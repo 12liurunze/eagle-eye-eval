@@ -151,7 +151,6 @@ def run_eval(
     #     json.dump(shuffled_ids, fout)
 
     # Split the question file into `num_gpus` files
-    get_answers_func = ray.remote(num_gpus=num_gpus_per_model)(get_model_answers).remote
     assert num_gpus_total % num_gpus_per_model == 0
     use_ray = num_gpus_total // num_gpus_per_model > 1
 
