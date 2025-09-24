@@ -301,6 +301,8 @@ def get_model_answers(
                 {"type": "text", "text": "Describe what happen in the video?"},
             ]}
         ]
+        # if item['duration'] > 1000:
+        #     continue
         text = model.processor.apply_chat_template(con, tokenize=False, add_generation_prompt=True)
         _, video_inputs, video_kwargs = process_vision_info(con, return_video_kwargs=True)
         inputs = model.processor(text=text, videos=video_inputs, return_tensors="pt", **video_kwargs)
