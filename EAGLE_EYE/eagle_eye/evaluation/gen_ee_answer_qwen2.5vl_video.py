@@ -297,7 +297,7 @@ def get_model_answers(
         url = item['path']
         con = [
             {"role": "user", "content": [
-                {"type": "video", "video": url, "fps": 1.0},
+                {"type": "video", "video": url, "max_pixels":448*448,"fps": 1.0},
                 {"type": "text", "text": "Describe what happen in the video?"},
             ]}
         ]

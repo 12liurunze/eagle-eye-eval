@@ -106,9 +106,12 @@ def run_eval(
     
     # random shuffle the questions to balance the loading
     random.seed(42)  
-
+    with open("/root/autodl-tmp/eagle-eye/EAGLE_EYE/eagle_eye/metadata.jsonl", "r") as f:
+        metadata = [json.loads(line) for line in f]
     #random.shuffle(questions)
-
+    num_tasks = num_gpus_total // num_gpus_per_model
+    chunk_size = (len(metadata) + num_tasks - 1) // num_tasks 
+    data_chunks = [metadata[i: i + chunk_size] for i in range(0, len(metadata), chunk_size)]
     #data=questions[question_begin:question_end]
     # with open(f"data/{args.bench_name}/model_ids/{args.model_id}.shuffled_ids", "w") as fout:
     #     json.dump(shuffled_ids, fout)
@@ -127,25 +130,27 @@ def run_eval(
 
     #chunk_size = len(data) // (num_gpus_total // num_gpus_per_model)  # // 2
     ans_handles = []
+    for chunk in data_chunks:
     #for i in range(0, len(data), chunk_size):
-    ans_handles.append(
-        get_answers_func(
-            base_model_path,
-            ee_model_path,
-            model_id,
-            #data[i: i + chunk_size],
-            answer_file,
-            #datapath,
-            max_new_token,
-            num_gpus_per_model,
-            max_gpu_memory,
-            temperature,
-            tree_choices,
+        ans_handles.append(
+            get_answers_func(
+                base_model_path,
+                ee_model_path,
+                model_id,
+                #data[i: i + chunk_size],
+                answer_file,
+                #datapath,
+                max_new_token,
+                num_gpus_per_model,
+                max_gpu_memory,
+                temperature,
+                tree_choices,
+                chunk
+            )
         )
-    )
 
-    if use_ray:
-        ray.get(ans_handles)
+        if use_ray:
+            ray.get(ans_handles)
 
 
 @torch.inference_mode()
@@ -161,6 +166,7 @@ def get_model_answers(
         max_gpu_memory,
         temperature,
         tree_choices,
+        data_chunk
 ):
 
     model = EeModel.from_pretrained(
@@ -180,95 +186,163 @@ def get_model_answers(
         logits_processor = None
 
     model.eval()
+    print(f"[Worker] Processing {len(data_chunk)} items...")
     print('warmup ...')
-    with open("/root/autodl-tmp/eagle-eye/EAGLE_EYE/eagle_eye/metadata.jsonl", "r") as f:
-        metadata = [json.loads(line) for line in f]
-    for item in metadata[:10]:
-        if 'video_id' in item :
-            url=item['path']
+    # print('warmup ...')
+    # with open("/root/autodl-tmp/eagle-eye/EAGLE_EYE/eagle_eye/metadata.jsonl", "r") as f:
+    #     metadata = [json.loads(line) for line in f]
+    # for item in metadata[:10]:
+    #     if 'video_id' in item :
+    #         url=item['path']
     #url = "/root/autodl-tmp/eagle-eye/EAGLE_EYE/eagle_eye/data/_kQXNFG664Y.mp4"
     # warmup
     # for j in range(10):
     #     url=os.path.join(datapath, questions[j]['label'], questions[j]['youtube_id']) + '.mp4'
     #     if not os.path.exists(url):
     #         continue
+        # con = [
+        #         {
+        #             "role": "user",
+        #             "content": [
+        #                 {
+        #                     "type": "video",
+        #                     "video":url,
+        #                     "fps": 1.0,
+        #                 },
+        #                 {"type": "text", "text": "Describe what happen in the video?"},
+        #             ],
+        #         }
+        #     ]
+
+
+        # text = model.processor.apply_chat_template(con, tokenize=False, add_generation_prompt=True)
+        # image_inputs, video_inputs, video_kwargs = process_vision_info(con, return_video_kwargs=True)
+
+        # inputs = model.processor(text=text, videos=video_inputs,return_tensors="pt",**video_kwargs)
+
+        # input_ids=inputs.input_ids
+        # pixel_values_videos=inputs.pixel_values_videos
+        # video_grid_thw=inputs.video_grid_thw
+        # # try:
+        # torch.cuda.synchronize()
+        # start_time = time.time()
+        # output_ids, new_token, idx = ee_forward(
+        #     input_ids=torch.as_tensor(input_ids).cuda(),
+        #     pixel_values_videos=torch.as_tensor(pixel_values_videos).cuda(),
+        #     video_grid_thw=torch.as_tensor(video_grid_thw).cuda(),
+        #     model=model,
+        #     tokenizer=tokenizer,
+        #     tree_choices=tree_choices,
+        #     logits_processor=logits_processor,
+        # )
+        # torch.cuda.synchronize()
+        # total_time = time.time() - start_time
+        # print('Warmup done')
+
+    # torch.manual_seed(123)
+    # for item in metadata:
+    #     if 'video_id' in item :
+    #         url=item['path']
+    # # for question in tqdm(questions):
+        
+    # #     url=os.path.join(datapath, question['label'], question['youtube_id']) + '.mp4'
+    # #     if not os.path.exists(url):
+    # #         continue
+    #     con = [
+    #             {
+    #                 "role": "user",
+    #                 "content": [
+    #                     {
+    #                         "type": "video",
+    #                         "video":url,
+    #                         "fps": 1.0,
+    #                     },
+    #                     {"type": "text", "text": "Describe what happen in the video?"},
+    #                 ],
+    #             }
+    #         ]
+
+
+    #     text = model.processor.apply_chat_template(con, tokenize=False, add_generation_prompt=True)
+    #     image_inputs, video_inputs, video_kwargs = process_vision_info(con, return_video_kwargs=True)
+        
+    #     inputs = model.processor(text=text, videos=video_inputs,return_tensors="pt",**video_kwargs)
+
+    #     input_ids=inputs.input_ids
+    #     pixel_values_videos=inputs.pixel_values_videos
+    #     video_grid_thw=inputs.video_grid_thw
+    #     torch.cuda.synchronize()
+    #     start_time = time.time()
+    #     output_ids, new_token, idx = ee_forward(
+    #         input_ids=torch.as_tensor(input_ids).cuda(),
+    #         pixel_values_videos=torch.as_tensor(pixel_values_videos).cuda(),
+    #         video_grid_thw=torch.as_tensor(video_grid_thw).cuda(),
+    #         model=model,
+    #         tokenizer=tokenizer,
+    #         tree_choices=tree_choices,
+    #         logits_processor=logits_processor,
+    #     )
+    #     torch.cuda.synchronize()
+    #     total_time = time.time() - start_time
+    #     output_ids = output_ids[0][len(input_ids[0]):]
+    #     new_token=output_ids.shape[-1]
+
+    #     output = tokenizer.decode(
+    #         output_ids,
+    #         spaces_between_special_tokens=False,
+    #     )
+    #     if tokenizer.eos_token and output.find(tokenizer.eos_token) > 0:
+    #         output = output[: output.find(tokenizer.eos_token)]
+    #     for special_token in tokenizer.special_tokens_map.values():
+    #         if isinstance(special_token, list):
+    #             for special_tok in special_token:
+    #                 output = output.replace(special_tok, "")
+    #         else:
+    #             output = output.replace(special_token, "")
+    #         output = output.strip()
+    if len(data_chunk) > 0:
+        warmup_item = data_chunk[0]
+        url = warmup_item['path']
         con = [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "video",
-                            "video":url,
-                            "fps": 1.0,
-                        },
-                        {"type": "text", "text": "Describe what happen in the video?"},
-                    ],
-                }
-            ]
-
-
+            {"role": "user", "content": [
+                {"type": "video", "video": url, "fps": 1.0},
+                {"type": "text", "text": "Describe what happen in the video?"},
+            ]}
+        ]
         text = model.processor.apply_chat_template(con, tokenize=False, add_generation_prompt=True)
-        image_inputs, video_inputs, video_kwargs = process_vision_info(con, return_video_kwargs=True)
-
-        inputs = model.processor(text=text, videos=video_inputs,return_tensors="pt",**video_kwargs)
-
-        input_ids=inputs.input_ids
-        pixel_values_videos=inputs.pixel_values_videos
-        video_grid_thw=inputs.video_grid_thw
-        # try:
-        torch.cuda.synchronize()
-        start_time = time.time()
-        output_ids, new_token, idx = ee_forward(
-            input_ids=torch.as_tensor(input_ids).cuda(),
-            pixel_values_videos=torch.as_tensor(pixel_values_videos).cuda(),
-            video_grid_thw=torch.as_tensor(video_grid_thw).cuda(),
+        _, video_inputs, video_kwargs = process_vision_info(con, return_video_kwargs=True)
+        inputs = model.processor(text=text, videos=video_inputs, return_tensors="pt", **video_kwargs)
+        ee_forward(
+            input_ids=inputs.input_ids.cuda(),
+            pixel_values_videos=inputs.pixel_values_videos.cuda(),
+            video_grid_thw=inputs.video_grid_thw.cuda(),
             model=model,
             tokenizer=tokenizer,
             tree_choices=tree_choices,
             logits_processor=logits_processor,
         )
-        torch.cuda.synchronize()
-        total_time = time.time() - start_time
-        print('Warmup done')
-
+        print("[Worker] Warmup done.")
     torch.manual_seed(123)
-    for item in metadata:
-        if 'video_id' in item :
-            url=item['path']
-    # for question in tqdm(questions):
-        
-    #     url=os.path.join(datapath, question['label'], question['youtube_id']) + '.mp4'
-    #     if not os.path.exists(url):
-    #         continue
+    for item in data_chunk:
+        url = item['path']
         con = [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "video",
-                            "video":url,
-                            "fps": 1.0,
-                        },
-                        {"type": "text", "text": "Describe what happen in the video?"},
-                    ],
-                }
-            ]
-
-
+            {"role": "user", "content": [
+                {"type": "video", "video": url, "max_pixels":448*448,"fps": 1.0},
+                {"type": "text", "text": "Describe what happen in the video?"},
+            ]}
+        ]
+        # if item['duration'] > 1000:
+        #     continue
         text = model.processor.apply_chat_template(con, tokenize=False, add_generation_prompt=True)
-        image_inputs, video_inputs, video_kwargs = process_vision_info(con, return_video_kwargs=True)
-        
-        inputs = model.processor(text=text, videos=video_inputs,return_tensors="pt",**video_kwargs)
+        _, video_inputs, video_kwargs = process_vision_info(con, return_video_kwargs=True)
+        inputs = model.processor(text=text, videos=video_inputs, return_tensors="pt", **video_kwargs)
 
-        input_ids=inputs.input_ids
-        pixel_values_videos=inputs.pixel_values_videos
-        video_grid_thw=inputs.video_grid_thw
         torch.cuda.synchronize()
         start_time = time.time()
-        output_ids, new_token, idx = ee_forward(
-            input_ids=torch.as_tensor(input_ids).cuda(),
-            pixel_values_videos=torch.as_tensor(pixel_values_videos).cuda(),
-            video_grid_thw=torch.as_tensor(video_grid_thw).cuda(),
+        output_ids, _, idx = ee_forward(
+            input_ids=inputs.input_ids.cuda(),
+            pixel_values_videos=inputs.pixel_values_videos.cuda(),
+            video_grid_thw=inputs.video_grid_thw.cuda(),
             model=model,
             tokenizer=tokenizer,
             tree_choices=tree_choices,
@@ -276,13 +350,11 @@ def get_model_answers(
         )
         torch.cuda.synchronize()
         total_time = time.time() - start_time
-        output_ids = output_ids[0][len(input_ids[0]):]
-        new_token=output_ids.shape[-1]
 
-        output = tokenizer.decode(
-            output_ids,
-            spaces_between_special_tokens=False,
-        )
+        # decode
+        output_ids = output_ids[0][len(inputs.input_ids[0]):]
+        new_token=output_ids.shape[-1]
+        output = tokenizer.decode(output_ids, spaces_between_special_tokens=False)
         if tokenizer.eos_token and output.find(tokenizer.eos_token) > 0:
             output = output[: output.find(tokenizer.eos_token)]
         for special_token in tokenizer.special_tokens_map.values():
@@ -291,8 +363,7 @@ def get_model_answers(
                     output = output.replace(special_tok, "")
             else:
                 output = output.replace(special_token, "")
-            output = output.strip()
-            
+        output = output.strip()
             # Dump answers
         
         with open(os.path.expanduser(answer_file), "a") as fout:
