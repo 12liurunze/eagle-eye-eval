@@ -1,25 +1,32 @@
 import argparse
 import json
 import os
+import time
 #os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
+from accelerate import init_empty_weights, infer_auto_device_map, dispatch_model
 import time
 import shortuuid
 from tqdm import tqdm
 from PIL import Image
 import pandas as pd
+from transformers import AutoConfig
+from accelerate import init_empty_weights, infer_auto_device_map
+from eagle_eye.model.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
+import torch
 #try:
 from eagle_eye.model.utils import *
 from eagle_eye.model.ee_model import EeModel
 from eagle_eye.model.kv_cache import initialize_past_key_values
 from eagle_eye.model.choices import *
-
+import numpy as np
 from qwen_vl_utils import process_vision_info
+print(torch.distributed.is_available())
 def ee_forward(input_ids, pixel_values_videos, video_grid_thw, model, tokenizer, tree_choices, logits_processor=None, max_steps=512):
     assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
     # Avoid modifying the input_ids in-place
     input_ids = input_ids.clone()
     model.ee_layer.reset_kv()
-
+    print(pixel_values_videos.shape)
     if hasattr(model, "tree_choices") and model.tree_choices == tree_choices:
         tree_buffers = model.tree_buffers
     else:
@@ -120,62 +127,33 @@ def run_eval(
         base_model_path,
         ee_model_path,
         model_id,
-        #question_file,
-        #question_begin,
-        #question_end,
         answer_file,
-        #datapath,
         max_new_token,
-        num_gpus_per_model,
-        num_gpus_total,
         max_gpu_memory,
         temperature,
         tree_choices,
 ):
-    #questions = pd.read_csv(question_file)
-    # with open(os.path.expanduser(question_file), "r") as f:
-    #     js = json.load(f)
-    #questions['label'] = questions['label'].str.replace(' ', '_')
-    #questions = questions.to_dict(orient='records')
-    
-    # random shuffle the questions to balance the loading
+   
     random.seed(42)  
     with open("/root/autodl-tmp/eagle-eye/EAGLE_EYE/eagle_eye/metadata.jsonl", "r") as f:
         metadata = [json.loads(line) for line in f]
-    #random.shuffle(questions)
-    #num_tasks = num_gpus_total // num_gpus_per_model
-    # chunk_size = (len(metadata) + num_tasks - 1) // num_tasks 
-    # data_chunks = [metadata[i: i + chunk_size] for i in range(0, len(metadata), chunk_size)]
-    #data=questions[question_begin:question_end]
-    # with open(f"data/{args.bench_name}/model_ids/{args.model_id}.shuffled_ids", "w") as fout:
-    #     json.dump(shuffled_ids, fout)
-
-    # Split the question file into `num_gpus` files
+    
     
     get_answers_func = get_model_answers
-
-    #chunk_size = len(data) // (num_gpus_total // num_gpus_per_model)  # // 2
     ans_handles = []
-    #for chunk in data_chunks:
-    #for i in range(0, len(data), chunk_size):
     ans_handles.append(
         get_answers_func(
             base_model_path,
             ee_model_path,
             model_id,
-            #data[i: i + chunk_size],
             answer_file,
-            #datapath,
             max_new_token,
-            num_gpus_per_model,
             max_gpu_memory,
             temperature,
             tree_choices,
             metadata
         )
     )
-
-   
 
 @torch.inference_mode()
 def get_model_answers(
@@ -186,23 +164,45 @@ def get_model_answers(
         answer_file,
         #datapath,
         max_new_token,
-        num_gpus_per_model,
         max_gpu_memory,
         temperature,
         tree_choices,
-        data_chunk
+        chunk,
 ):
+    
+    config = AutoConfig.from_pretrained("/root/autodl-tmp/qwen2.5vl")
 
+    # 空模型
+    with init_empty_weights():
+        empty_model = Qwen2_5_VLForConditionalGeneration._from_config(config)
+
+    # 自动 device_map
+    device_map = infer_auto_device_map(
+        empty_model,
+        max_memory={0: "24GiB", 1: "24GiB"},
+        no_split_module_classes=["Qwen2_5_VLVisionBlock"],  # 保证单个block不被拆开
+    )
+
+    # 手动调整 visual 层的切分
+    num_layers = len(empty_model.visual.blocks)  # 32
+    for i in range(num_layers):
+        target_gpu = 0 if i < num_layers // 2 else 1
+        device_map[f"visual.blocks.{i}"] = target_gpu
+
+    # merger 放到最后一个 GPU
+    device_map["visual.merger"] = 1
+
+    print(device_map)
     model = EeModel.from_pretrained(
         base_model_path=base_model_path,
         ee_model_path=ee_model_path,
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
-        device_map="auto",
+        device_map=device_map,
         attn_implementation="eager",
         tp_plan=None
     )
-
+    #print(len(model.visual_encoder.layers))
     tokenizer = model.get_tokenizer()
 
     if temperature > 1e-5:
@@ -211,73 +211,26 @@ def get_model_answers(
         logits_processor = None
 
     model.eval()
-    print(f"[Worker] Processing {len(data_chunk)} items...")
+    print(f"[Worker] Processing {len(chunk)} items...")
     print('warmup ...')
-    # with open("/root/autodl-tmp/eagle-eye/EAGLE_EYE/eagle_eye/metadata.jsonl", "r") as f:
-    #     metadata = [json.loads(line) for line in f]
-    # for item in metadata[:10]:
-    #     if 'video_id' in item :
-    #         url=item['path']
-    #url = "/root/autodl-tmp/eagle-eye/EAGLE_EYE/eagle_eye/data/_kQXNFG664Y.mp4"
-    # warmup
-    # for j in range(10):
-    #     url=os.path.join(datapath, questions[j]['label'], questions[j]['youtube_id']) + '.mp4'
-    #     if not os.path.exists(url):
-    #         continue
-        # con = [
-        #         {
-        #             "role": "user",
-        #             "content": [
-        #                 {
-        #                     "type": "video",
-        #                     "video":url,
-        #                     "fps": 1.0,
-        #                 },
-        #                 {"type": "text", "text": "Describe what happen in the video?"},
-        #             ],
-        #         }
-        #     ]
-
-
-        # text = model.processor.apply_chat_template(con, tokenize=False, add_generation_prompt=True)
-        # image_inputs, video_inputs, video_kwargs = process_vision_info(con, return_video_kwargs=True)
-
-        # inputs = model.processor(text=text, videos=video_inputs,return_tensors="pt",**video_kwargs)
-
-        # input_ids=inputs.input_ids
-        # pixel_values_videos=inputs.pixel_values_videos
-        # video_grid_thw=inputs.video_grid_thw
-        # # try:
-        # torch.cuda.synchronize()
-        # start_time = time.time()
-        # output_ids, new_token, idx = ee_forward(
-        #     input_ids=torch.as_tensor(input_ids).cuda(),
-        #     pixel_values_videos=torch.as_tensor(pixel_values_videos).cuda(),
-        #     video_grid_thw=torch.as_tensor(video_grid_thw).cuda(),
-        #     model=model,
-        #     tokenizer=tokenizer,
-        #     tree_choices=tree_choices,
-        #     logits_processor=logits_processor,
-        # )
-        # torch.cuda.synchronize()
-        # total_time = time.time() - start_time
-        # print('Warmup done')
-    if len(data_chunk) > 0:
-        warmup_item = data_chunk[0]
+    
+    if len(chunk) > 0:
+        warmup_item = chunk[0]
         url = warmup_item['path']
         con = [
             {"role": "user", "content": [
-                {"type": "video", "video": url, "fps": 1.0},
+                {"type": "video", "video": url, "max_pixels":448*448,"fps": 1.0},
                 {"type": "text", "text": "Describe what happen in the video?"},
             ]}
         ]
         text = model.processor.apply_chat_template(con, tokenize=False, add_generation_prompt=True)
         _, video_inputs, video_kwargs = process_vision_info(con, return_video_kwargs=True)
         inputs = model.processor(text=text, videos=video_inputs, return_tensors="pt", **video_kwargs)
+        print(inputs.input_ids.shape, inputs.pixel_values_videos.shape, inputs.video_grid_thw.shape)
         ee_forward(
-            input_ids=inputs.input_ids.cuda(),
-            pixel_values_videos=inputs.pixel_values_videos.cuda(),
-            video_grid_thw=inputs.video_grid_thw.cuda(),
+            input_ids=inputs.input_ids,
+            pixel_values_videos=inputs.pixel_values_videos,
+            video_grid_thw=inputs.video_grid_thw,
             model=model,
             tokenizer=tokenizer,
             tree_choices=tree_choices,
@@ -285,8 +238,9 @@ def get_model_answers(
         )
         print("[Worker] Warmup done.")
     torch.manual_seed(123)
-    for item in data_chunk:
+    for item in chunk:
         url = item['path']
+        print(url)
         con = [
             {"role": "user", "content": [
                 {"type": "video", "video": url, "max_pixels":448*448,"fps": 1.0},
@@ -298,13 +252,13 @@ def get_model_answers(
         text = model.processor.apply_chat_template(con, tokenize=False, add_generation_prompt=True)
         _, video_inputs, video_kwargs = process_vision_info(con, return_video_kwargs=True)
         inputs = model.processor(text=text, videos=video_inputs, return_tensors="pt", **video_kwargs)
-
+        
         torch.cuda.synchronize()
         start_time = time.time()
         output_ids, _, idx = ee_forward(
-            input_ids=inputs.input_ids.cuda(),
-            pixel_values_videos=inputs.pixel_values_videos.cuda(),
-            video_grid_thw=inputs.video_grid_thw.cuda(),
+            input_ids=inputs.input_ids,
+            pixel_values_videos=inputs.pixel_values_videos,
+            video_grid_thw=inputs.video_grid_thw,
             model=model,
             tokenizer=tokenizer,
             tree_choices=tree_choices,
@@ -326,72 +280,11 @@ def get_model_answers(
             else:
                 output = output.replace(special_token, "")
         output = output.strip()
-    # for item in metadata:
-    #     if 'video_id' in item :
-    #         url=item['path']
-    # # for question in tqdm(questions):
-        
-    # #     url=os.path.join(datapath, question['label'], question['youtube_id']) + '.mp4'
-    # #     if not os.path.exists(url):
-    # #         continue
-    #     con = [
-    #             {
-    #                 "role": "user",
-    #                 "content": [
-    #                     {
-    #                         "type": "video",
-    #                         "video":url,
-    #                         "fps": 1.0,
-    #                     },
-    #                     {"type": "text", "text": "Describe what happen in the video?"},
-    #                 ],
-    #             }
-    #         ]
-
-
-    #     text = model.processor.apply_chat_template(con, tokenize=False, add_generation_prompt=True)
-    #     image_inputs, video_inputs, video_kwargs = process_vision_info(con, return_video_kwargs=True)
-        
-    #     inputs = model.processor(text=text, videos=video_inputs,return_tensors="pt",**video_kwargs)
-
-    #     input_ids=inputs.input_ids
-    #     pixel_values_videos=inputs.pixel_values_videos
-    #     video_grid_thw=inputs.video_grid_thw
-    #     torch.cuda.synchronize()
-    #     start_time = time.time()
-    #     output_ids, new_token, idx = ee_forward(
-    #         input_ids=torch.as_tensor(input_ids).cuda(),
-    #         pixel_values_videos=torch.as_tensor(pixel_values_videos).cuda(),
-    #         video_grid_thw=torch.as_tensor(video_grid_thw).cuda(),
-    #         model=model,
-    #         tokenizer=tokenizer,
-    #         tree_choices=tree_choices,
-    #         logits_processor=logits_processor,
-    #     )
-    #     torch.cuda.synchronize()
-    #     total_time = time.time() - start_time
-    #     output_ids = output_ids[0][len(input_ids[0]):]
-    #     new_token=output_ids.shape[-1]
-
-    #     output = tokenizer.decode(
-    #         output_ids,
-    #         spaces_between_special_tokens=False,
-    #     )
-    #     if tokenizer.eos_token and output.find(tokenizer.eos_token) > 0:
-    #         output = output[: output.find(tokenizer.eos_token)]
-    #     for special_token in tokenizer.special_tokens_map.values():
-    #         if isinstance(special_token, list):
-    #             for special_tok in special_token:
-    #                 output = output.replace(special_tok, "")
-    #         else:
-    #             output = output.replace(special_token, "")
-    #         output = output.strip()
-            
+   
             # Dump answers
         
         with open(os.path.expanduser(answer_file), "a") as fout:
             ans_json = {
-                #"question_id": os.path.join(question['label'], question['youtube_id']),
                 "answer_id": shortuuid.uuid(),
                 "model_id": model_id,
                 "response":output,
@@ -426,36 +319,13 @@ if __name__ == "__main__":
         default="COCO-caption",
         help="The name of the benchmark question set.",
     )
-    parser.add_argument(
-        "--question-begin",
-        type=int,
-        default=0,
-        help="A debug option. The begin index of questions.",
-    )
-    parser.add_argument(
-        "--question-end", 
-        type=int, 
-        default=100,
-        help="A debug option. The end index of questions."
-    )
+    
     parser.add_argument("--answer-dir", type=str,default="/root/autodl-tmp/eagle-eye/EAGLE_EYE/eagle_eye/outputs",help="The output answer file.")
-    # parser.add_argument("--datajson", type=str, default="/home/dhz/K400/val.csv",help="Path to the input JSON file containing questions or data.")  
-    # parser.add_argument("--datapath", type=str, default="/home/dhz/K400/val_256",help="Name or path of the dataset to be used for evaluation.")  
-
     parser.add_argument(
         "--max-new-token",
         type=int,
         default=1024,
         help="The maximum number of new generated tokens.",
-    )
-    parser.add_argument(
-        "--num-gpus-per-model",
-        type=int,
-        default=1,
-        help="The number of GPUs per model.",
-    )
-    parser.add_argument(
-        "--num-gpus-total", type=int, default=1, help="The total number of GPUs."
     )
     parser.add_argument(
         "--max-gpu-memory",
@@ -478,34 +348,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     args.model_id = args.model_id + "-temperature-" + str(args.temperature)
-    # question_file=args.datajson
-    # datapath=args.datapath
-    
-
     args.tree_choices = eval(args.tree_choices)
-    if args.num_gpus_total // args.num_gpus_per_model > 1:
-        import ray
-
-        ray.init()
-
-    
     answer_file = os.path.join(args.answer_dir, f"{args.model_id}.jsonl")
     os.makedirs(os.path.dirname(answer_file), exist_ok=True)
-
     print(f"Output to {answer_file}")
-
     run_eval(
         base_model_path=args.base_model_path,
         ee_model_path=args.ee_model_path,
         model_id=args.model_id,
-        #question_file=question_file,
-        #question_begin=args.question_begin,
-        #question_end=args.question_end,
         answer_file=answer_file,
-        #datapath=datapath,
         max_new_token=args.max_new_token,
-        num_gpus_per_model=args.num_gpus_per_model,
-        num_gpus_total=args.num_gpus_total,
         max_gpu_memory=args.max_gpu_memory,
         temperature=args.temperature,
         tree_choices=args.tree_choices,
